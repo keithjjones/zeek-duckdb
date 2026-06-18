@@ -43,3 +43,22 @@ query I
 SELECT COUNT(*) FROM read_zeek('data/dns.log.gz') WHERE proto = 'udp' AND id_resp_h = '8.8.4.4'::inet;
 ----
 2
+
+# IN filter on INET column — triggers the post-scan projection path.
+query I
+SELECT COUNT(*) FROM read_zeek('data/dns.log.gz') WHERE id_resp_h IN ('8.8.4.4'::inet);
+----
+2
+
+# Multi-value IN filter on INET column (only 8.8.4.4 exists in id_resp_h for this data).
+query I
+SELECT COUNT(*) FROM read_zeek('data/dns.log.gz') WHERE id_resp_h IN ('8.8.4.4'::inet, '127.0.0.1'::inet);
+----
+2
+
+# IN filter with multiple projected columns (regression: scan output chunk sizing).
+# Use VARCHAR comparison (no inet cast) to avoid DuckDB PhysicalProjection bug with IN+INET.
+query II
+SELECT id_orig_h, id_resp_h FROM read_zeek('data/dns.log.gz', inet:=false) WHERE id_resp_h IN ('8.8.4.4') LIMIT 1;
+----
+10.20.40.41	8.8.4.4

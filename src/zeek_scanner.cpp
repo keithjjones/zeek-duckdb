@@ -616,12 +616,21 @@ static unique_ptr<GlobalTableFunctionState> ZeekScanInitGlobal(ClientContext &co
 
 	// Resolve projection: which schema columns does the query actually want?
 	// column_ids is provided by DuckDB when projection_pushdown = true.
+	// projection_ids maps from output DataChunk position to column_ids index.
+	// When empty, the mapping is identity (output.data[i] == column_ids[i]).
 	// An empty column_ids means COUNT(*) — no columns needed at all.
 	if (input.column_ids.empty()) {
 		result->count_only = true;
-	} else {
+	} else if (input.projection_ids.empty()) {
+		// Identity mapping: every column_ids entry is an output column.
 		for (auto &col_id : input.column_ids) {
 			result->projected_schema_cols.push_back(col_id);
+		}
+	} else {
+		// Non-identity projection: only columns referenced by projection_ids go to output.
+		result->projected_schema_cols.reserve(input.projection_ids.size());
+		for (auto &proj_idx : input.projection_ids) {
+			result->projected_schema_cols.push_back(input.column_ids[proj_idx]);
 		}
 	}
 
