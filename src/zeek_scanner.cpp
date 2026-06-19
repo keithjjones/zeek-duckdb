@@ -111,10 +111,16 @@ static bool IsNativelyHandled(const LogicalType &type) {
 	}
 }
 
+//! Returns true if the type is the inet extension's INET type (a STRUCT aliased "INET").
+static bool IsInetType(const LogicalType &type) {
+	return type.id() == LogicalTypeId::STRUCT && type.HasAlias() && type.GetAlias() == "INET";
+}
+
 //! Returns true if filter pushdown is efficient for this column type (see supports_pushdown_type).
-//! We only advertise pushdown for types we can parse from a slice without going through an
-//! extension cast — LIST and INET are excluded because per-row evaluation would be slower than
-//! letting DuckDB filter post-scan.
+//! We advertise pushdown for types we can parse from a slice, plus INET. INET requires an extension
+//! cast per row, but pushing it down is still preferable to letting DuckDB extract the filter into a
+//! PhysicalFilter — that extraction path corrupts projection_ids on multi-column projections and
+//! crashes ("Attempted to access index N within vector of size N"). LIST is still excluded.
 static bool CanPushdownFilterOnType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::VARCHAR:
@@ -127,14 +133,24 @@ static bool CanPushdownFilterOnType(const LogicalType &type) {
 	case LogicalTypeId::USMALLINT:
 		return true;
 	default:
-		return false;
+		return IsInetType(type);
 	}
 }
 
 //! Parse a slice into a DuckDB Value of the given type. Returns a NULL Value of the target type
 //! on parse failure. This is only called for filter columns and only for types where
-//! CanPushdownFilterOnType returns true.
-static Value SliceToValue(const FieldSlice &field, const LogicalType &type) {
+//! CanPushdownFilterOnType returns true. `context` is needed for the INET extension cast.
+static Value SliceToValue(ClientContext &context, const FieldSlice &field, const LogicalType &type) {
+	if (IsInetType(type)) {
+		// The slice is the textual address; cast a VARCHAR Value to INET so the comparison runs
+		// with the inet extension's semantics (normalization, IP-aware ordering).
+		Value inet_val;
+		string error_message;
+		if (Value(string(field.ptr, field.len)).TryCastAs(context, type, inet_val, &error_message)) {
+			return inet_val;
+		}
+		return Value(type);
+	}
 	string_t s(field.ptr, field.len);
 	switch (type.id()) {
 	case LogicalTypeId::VARCHAR:
@@ -768,7 +784,7 @@ static void ZeekScanExecute(ClientContext &context, TableFunctionInput &data, Da
 				}
 
 				// Parse the slice into a Value of the column's type and evaluate.
-				Value row_val = SliceToValue(field, bind_data.column_types[schema_col]);
+				Value row_val = SliceToValue(context, field, bind_data.column_types[schema_col]);
 				if (!EvaluateFilter(filter, row_val, row_val.IsNull())) {
 					row_passes = false;
 					break;

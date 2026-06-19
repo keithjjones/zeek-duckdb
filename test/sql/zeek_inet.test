@@ -26,8 +26,8 @@ SELECT typeof(host_ip) FROM read_zeek('data/known_hosts_20260116_00.00.00-01.00.
 ----
 INET
 
-# Filter on INET column — pushdown is disabled for INET so DuckDB applies it post-scan.
-# Verify this still produces correct results.
+# Filter on INET column — the scanner handles INET filters itself (pushdown enabled) so DuckDB
+# does not extract them into a PhysicalFilter. Verify this produces correct results.
 query I
 SELECT COUNT(*) FROM read_zeek('data/dns.log.gz') WHERE id_orig_h = '10.20.40.41'::inet;
 ----
@@ -44,7 +44,7 @@ SELECT COUNT(*) FROM read_zeek('data/dns.log.gz') WHERE proto = 'udp' AND id_res
 ----
 2
 
-# IN filter on INET column — triggers the post-scan projection path.
+# IN filter on INET column.
 query I
 SELECT COUNT(*) FROM read_zeek('data/dns.log.gz') WHERE id_resp_h IN ('8.8.4.4'::inet);
 ----
@@ -62,3 +62,33 @@ query II
 SELECT id_orig_h, id_resp_h FROM read_zeek('data/dns.log.gz', inet:=false) WHERE id_resp_h IN ('8.8.4.4') LIMIT 1;
 ----
 10.20.40.41	8.8.4.4
+
+# Regression: an INET = / IN / OR filter combined with a multi-column projection used to crash with
+# "Attempted to access index N within vector of size N". The crash came from DuckDB extracting the
+# filter into a PhysicalFilter (because INET was not advertised as a pushdown type) and corrupting
+# projection_ids on a multi-column projection. The scanner now handles INET filters itself.
+
+# Multi-column projection + INET equality filter.
+query II
+SELECT id_resp_h, id_orig_h FROM read_zeek('data/dns.log.gz') WHERE id_resp_h = '8.8.4.4'::inet LIMIT 1;
+----
+8.8.4.4	10.20.40.41
+
+# Multi-column projection + INET OR filter.
+query I
+SELECT COUNT(*) FROM (SELECT id_resp_h, id_orig_h FROM read_zeek('data/dns.log.gz') WHERE id_resp_h = '8.8.4.4'::inet OR id_orig_h = '10.20.40.41'::inet);
+----
+2
+
+# Multi-column projection + multi-value INET IN filter.
+query I
+SELECT COUNT(*) FROM (SELECT id_resp_h, id_orig_h FROM read_zeek('data/dns.log.gz') WHERE id_resp_h IN ('8.8.4.4'::inet, '127.0.0.1'::inet));
+----
+2
+
+# INET subnet containment (<<=) with a multi-column projection. Not pushed down as a TableFilter,
+# but must still produce correct results without crashing.
+query I
+SELECT COUNT(*) FROM (SELECT id_resp_h, id_orig_h FROM read_zeek('data/dns.log.gz') WHERE id_orig_h <<= '10.0.0.0/8'::inet);
+----
+2
